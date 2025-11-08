@@ -140,16 +140,18 @@ def store_chunk(node: str, chunk_name: str, content_str: str) -> bool:
     s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Disable Nagle's algorithm for faster small writes
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         # Increase socket buffer sizes for large chunks
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4_000_000)
-        s.settimeout(60)  # ✅ 60 seconds for large chunks
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8_000_000)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8_000_000)
+        s.settimeout(90)  # ✅ 90 seconds for large chunks
         s.connect((ip, port))
         
         payload = {"action": "store", "filename": chunk_name, "content": content_str}
         req_data = json.dumps(payload).encode()
         
-        log_console(f"📤 Sending {len(req_data)} bytes to {node}")
+        log_console(f"📤 Sending {len(req_data)//1024} KB to {node}")
         s.sendall(req_data)
         
         # Shutdown write side to signal end of request
@@ -158,7 +160,7 @@ def store_chunk(node: str, chunk_name: str, content_str: str) -> bool:
         except:
             pass
         
-        data = recv_all(s, timeout=60)  # ✅ 60 seconds to receive response
+        data = recv_all(s, timeout=90)  # ✅ 90 seconds to receive response
         
         if data:
             res = json.loads(data.decode())
@@ -201,13 +203,23 @@ def read_chunk(node: str, chunk_name: str) -> dict:
         return {}
 
 # ---------- CLIENT HANDLERS ----------
-def handle_upload(filename: str, content_str: str) -> dict:
+def handle_upload(filename: str, content_str: str = None, content_b64: str = None) -> dict:
     """Handle file upload with chunking and replication."""
     try:
         log_console(f"🔼 Starting upload for {filename}")
         
-        # Convert from latin-1 string to bytes
-        raw = content_str.encode("latin-1", errors="ignore")
+        # Support both latin-1 and base64 encoding
+        if content_b64:
+            import base64
+            log_console(f"📦 Decoding base64 content ({len(content_b64)} chars)")
+            raw = base64.b64decode(content_b64)
+        elif content_str:
+            log_console(f"📦 Decoding latin-1 content ({len(content_str)} chars)")
+            raw = content_str.encode("latin-1", errors="ignore")
+        else:
+            return {"status": "error", "msg": "No content provided"}
+        
+        log_console(f"📊 File size: {len(raw)} bytes ({len(raw)/1024/1024:.2f} MB)")
         
         if len(raw) > MAX_UPLOAD_BYTES:
             return {"status": "error", "msg": "File too large (> 50 MB)"}
@@ -221,7 +233,7 @@ def handle_upload(filename: str, content_str: str) -> dict:
         if not parts:
             parts = [b""]  # Empty file
 
-        log_console(f"📦 File will be split into {len(parts)} chunks")
+        log_console(f"📦 File will be split into {len(parts)} chunks ({CHUNK_SIZE/1024/1024:.1f}MB each)")
         chunks_meta = []
 
         for i, part in enumerate(parts):
@@ -229,17 +241,17 @@ def handle_upload(filename: str, content_str: str) -> dict:
             payload = part.decode("latin-1", errors="ignore")
             chunk_hash = sha256_bytes(part)
             
-            log_console(f"📤 Processing chunk {i+1}/{len(parts)}: {chunk_name} ({len(part)} bytes)")
+            log_console(f"📤 Chunk {i+1}/{len(parts)}: {chunk_name} ({len(part)} bytes)")
 
             # Replicate to all available nodes
             replicas = []
             for node in DATANODES.keys():
-                log_console(f"  → Attempting to store on {node}...")
+                log_console(f"  → Storing on {node}...")
                 if store_chunk(node, chunk_name, payload):
                     replicas.append(node)
-                    log_console(f"  ✅ Success on {node}")
+                    log_console(f"  ✅ {node}")
                 else:
-                    log_console(f"  ❌ Failed on {node}")
+                    log_console(f"  ❌ {node}")
 
             if not replicas:
                 log_console(f"❌ No replicas for chunk {chunk_name}")
@@ -317,7 +329,13 @@ def handle_status() -> dict:
 # ---------- CLIENT CONNECTION HANDLER ----------
 def client_handler(conn: socket.socket, addr):
     try:
-        raw = recv_all(conn, timeout=60)
+        # Increase buffer sizes for large uploads
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8_000_000)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8_000_000)
+        
+        log_console(f"📞 New connection from {addr}")
+        
+        raw = recv_all(conn, timeout=180)  # ✅ 3 minutes for large uploads
         
         if not raw:
             log_console(f"⚠ Empty request from {addr}")
@@ -334,7 +352,9 @@ def client_handler(conn: socket.socket, addr):
 
         # Route to handlers
         if action == "upload":
-            res = handle_upload(req["filename"], req["content"])
+            content_b64 = req.get("content_b64")
+            content_str = req.get("content")
+            res = handle_upload(req["filename"], content_str=content_str, content_b64=content_b64)
         elif action == "download":
             res = handle_download(req["filename"])
         elif action == "status":

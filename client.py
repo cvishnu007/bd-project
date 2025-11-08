@@ -59,23 +59,26 @@ def recv_all(s: socket.socket, timeout=120) -> bytes:
     debug(f"📥 Total received: {len(full)} bytes ({len(full)/1024:.1f} KB)")
     return full
 
-def send_namenode(payload: dict, timeout=120) -> dict:
+def send_namenode(payload: dict, timeout=240) -> dict:
     """Send request to NameNode and get response."""
     debug(f"→ Connecting to NameNode: {NAMENODE}")
     s = socket.socket()
     
     try:
         # Increase buffer sizes for large uploads
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4_000_000)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8_000_000)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8_000_000)
         s.settimeout(timeout)
         s.connect(NAMENODE)
         debug(f"✅ Connected to NameNode")
 
         # Send request
         req = json.dumps(payload).encode()
-        debug(f"📤 Sending {len(req)} bytes ({len(req)/1024/1024:.2f} MB)")
+        size_mb = len(req) / 1024 / 1024
+        debug(f"📤 Sending {len(req)} bytes ({size_mb:.2f} MB)")
+        
         s.sendall(req)
+        debug(f"✅ Sent complete")
         
         # Graceful shutdown to signal end of request
         try:
@@ -150,22 +153,29 @@ def sha256_bytes(b: bytes) -> str:
 
 # ---------- CLIENT ACTIONS ----------
 def upload_file(filename: str, raw_bytes: bytes):
-    """Upload a file to HDFS."""
-    debug(f"🔼 Uploading {filename} ({len(raw_bytes)} bytes)")
+    """Upload a file to HDFS using base64 encoding."""
+    size_mb = len(raw_bytes) / 1024 / 1024
+    debug(f"🔼 Uploading {filename} ({len(raw_bytes)} bytes = {size_mb:.2f} MB)")
     
     if len(raw_bytes) > MAX_UPLOAD_BYTES:
         return {"status": "error", "msg": "File exceeds 50 MB limit"}
 
-    # Encode as latin-1 for JSON transport
-    content_str = raw_bytes.decode("latin-1", errors="ignore")
+    # Use base64 encoding - more efficient and reliable than latin-1
+    import base64
+    content_b64 = base64.b64encode(raw_bytes).decode('ascii')
+    debug(f"📦 Encoded to base64: {len(content_b64)} chars")
+    
     payload = {
         "action": "upload",
         "filename": filename,
-        "content": content_str
+        "content_b64": content_b64  # Use base64 key
     }
     
-    # Use longer timeout for large files (2 minutes)
-    return send_namenode(payload, timeout=180)
+    # Calculate estimated time: ~5 seconds per MB
+    estimated_time = max(3000, int(size_mb * 60))
+    debug(f"⏱ Estimated time: {estimated_time}s")
+    
+    return send_namenode(payload, timeout=estimated_time)
 
 def download_manifest(filename: str):
     """Get download manifest from NameNode."""

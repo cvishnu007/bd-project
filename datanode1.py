@@ -21,15 +21,17 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 # ---------- CONFIG ----------
-DATANODE_NAME = "datanode2"              # change to "datanode1" on that machine
-DATANODE_HOST = "172.22.194.94"          # this machine's ZeroTier IP
-DATANODE_PORT = 5002                     # port unique per DataNode
+# ---------- CONFIG ----------
+DATANODE_NAME = "datanode1"              # unique node name
+DATANODE_HOST = "172.22.192.208"         # ZeroTier IP of this node
+DATANODE_PORT = 5001                     # unique TCP port
 
 NAMENODE_HOST = "172.22.194.120"         # NameNode IP
 NAMENODE_HEARTBEAT_PORT = 6000           # UDP port for heartbeats
 
-DATA_DIR = "data_blocks"
+DATA_DIR = "data_blocks"                 # local storage folder
 HEARTBEAT_INTERVAL_SEC = 5
+
 
 # ---------- SETUP ----------
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -157,5 +159,5 @@ def main():
     threading.Thread(target=send_heartbeat, daemon=True).start()
     start_server()
 
-if _name_ == "_main_":
+if _name_ == "main":
     main()
