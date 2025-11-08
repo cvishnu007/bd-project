@@ -30,10 +30,11 @@ def debug(msg):
         st.session_state.debug_logs.pop(0)
 
 # ---------- SOCKET HELPERS ----------
-def recv_all(s: socket.socket, timeout=20) -> bytes:
+def recv_all(s: socket.socket, timeout=120) -> bytes:
     """Receive all data from socket until EOF or timeout."""
     s.settimeout(timeout)
     chunks = []
+    total = 0
     
     while True:
         try:
@@ -41,30 +42,39 @@ def recv_all(s: socket.socket, timeout=20) -> bytes:
             if not part:
                 break
             chunks.append(part)
+            total += len(part)
+            
+            # Log progress
+            if total % (512 * 1024) == 0:  # Every 512KB
+                debug(f"📥 Received {total // 1024} KB...")
+                
         except socket.timeout:
-            debug("⚠ Socket timeout during receive")
+            debug(f"⚠ Socket timeout after {total} bytes")
             break
         except Exception as e:
             debug(f"⚠ Socket error: {e}")
             break
 
     full = b"".join(chunks)
-    debug(f"📥 Received {len(full)} bytes")
+    debug(f"📥 Total received: {len(full)} bytes ({len(full)/1024:.1f} KB)")
     return full
 
-def send_namenode(payload: dict, timeout=60) -> dict:
+def send_namenode(payload: dict, timeout=120) -> dict:
     """Send request to NameNode and get response."""
     debug(f"→ Connecting to NameNode: {NAMENODE}")
     s = socket.socket()
     
     try:
+        # Increase buffer sizes for large uploads
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4_000_000)
         s.settimeout(timeout)
         s.connect(NAMENODE)
         debug(f"✅ Connected to NameNode")
 
         # Send request
         req = json.dumps(payload).encode()
-        debug(f"📤 Sending {len(req)} bytes")
+        debug(f"📤 Sending {len(req)} bytes ({len(req)/1024/1024:.2f} MB)")
         s.sendall(req)
         
         # Graceful shutdown to signal end of request
@@ -95,13 +105,23 @@ def read_chunk_from(node_key: str, chunk_name: str):
     debug(f"→ Requesting {chunk_name} from {node_key}")
     
     s = socket.socket()
-    s.settimeout(10)
+    # Increase buffer sizes
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4_000_000)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+    s.settimeout(60)  # ✅ Increased from 10s to 60s
     
     try:
         s.connect((ip, port))
-        s.sendall(json.dumps({"action": "read", "filename": chunk_name}).encode())
+        request = json.dumps({"action": "read", "filename": chunk_name}).encode()
+        s.sendall(request)
         
-        data = recv_all(s, timeout=10)
+        # Shutdown write side
+        try:
+            s.shutdown(socket.SHUT_WR)
+        except:
+            pass
+        
+        data = recv_all(s, timeout=60)  # ✅ Increased from 10s to 60s
         
         if not data:
             debug(f"❌ No data from {node_key}")
@@ -144,7 +164,8 @@ def upload_file(filename: str, raw_bytes: bytes):
         "content": content_str
     }
     
-    return send_namenode(payload, timeout=120)
+    # Use longer timeout for large files (2 minutes)
+    return send_namenode(payload, timeout=180)
 
 def download_manifest(filename: str):
     """Get download manifest from NameNode."""

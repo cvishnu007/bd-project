@@ -66,23 +66,33 @@ def load_metadata():
         save_metadata()
 
 # ---------- SOCKET HELPERS ----------
-def recv_all(conn: socket.socket, timeout=30) -> bytes:
+def recv_all(conn: socket.socket, timeout=120) -> bytes:
     """Receive all data from socket until EOF or timeout."""
     conn.settimeout(timeout)
     chunks = []
+    total = 0
+    
     while True:
         try:
             part = conn.recv(65536)
             if not part:
                 break
             chunks.append(part)
+            total += len(part)
+            
+            # Log progress every 1MB
+            if total % (1024 * 1024) == 0:
+                log_console(f"📥 Received {total // (1024*1024)} MB so far...")
+                
         except socket.timeout:
+            log_console(f"⏱ Timeout after receiving {total} bytes")
             break  # ✅ FIXED: Exit on timeout instead of continue
         except Exception as e:
             log_console(f"recv_all exception: {e}")
             break
+            
     data = b"".join(chunks)
-    log_console(f"📥 Received {len(data)} bytes total")
+    log_console(f"📥 Received {len(data)} bytes total ({len(data)/1024/1024:.2f} MB)")
     return data
 
 def alive_nodes() -> List[str]:
@@ -127,12 +137,20 @@ def store_chunk(node: str, chunk_name: str, content_str: str) -> bool:
         return False
 
     ip, port = DATANODES[node]
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(30)  # ✅ Increased for large chunks
+        # Increase socket buffer sizes for large chunks
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4_000_000)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4_000_000)
+        s.settimeout(60)  # ✅ 60 seconds for large chunks
         s.connect((ip, port))
+        
         payload = {"action": "store", "filename": chunk_name, "content": content_str}
-        s.sendall(json.dumps(payload).encode())
+        req_data = json.dumps(payload).encode()
+        
+        log_console(f"📤 Sending {len(req_data)} bytes to {node}")
+        s.sendall(req_data)
         
         # Shutdown write side to signal end of request
         try:
@@ -140,8 +158,7 @@ def store_chunk(node: str, chunk_name: str, content_str: str) -> bool:
         except:
             pass
         
-        data = recv_all(s, timeout=30)  # ✅ Increased timeout
-        s.close()
+        data = recv_all(s, timeout=60)  # ✅ 60 seconds to receive response
         
         if data:
             res = json.loads(data.decode())
@@ -151,9 +168,18 @@ def store_chunk(node: str, chunk_name: str, content_str: str) -> bool:
         
         log_console(f"⚠ Store failed on {node}")
         return False
+    except socket.timeout:
+        log_console(f"❌ Timeout storing on {node}")
+        return False
     except Exception as e:
         log_console(f"❌ Store on {node} failed: {e}")
         return False
+    finally:
+        if s:
+            try:
+                s.close()
+            except:
+                pass
 
 def read_chunk(node: str, chunk_name: str) -> dict:
     """Read a chunk from a DataNode."""
@@ -178,6 +204,8 @@ def read_chunk(node: str, chunk_name: str) -> dict:
 def handle_upload(filename: str, content_str: str) -> dict:
     """Handle file upload with chunking and replication."""
     try:
+        log_console(f"🔼 Starting upload for {filename}")
+        
         # Convert from latin-1 string to bytes
         raw = content_str.encode("latin-1", errors="ignore")
         
@@ -193,20 +221,28 @@ def handle_upload(filename: str, content_str: str) -> dict:
         if not parts:
             parts = [b""]  # Empty file
 
+        log_console(f"📦 File will be split into {len(parts)} chunks")
         chunks_meta = []
 
         for i, part in enumerate(parts):
             chunk_name = f"{filename}_part{i}"
             payload = part.decode("latin-1", errors="ignore")
             chunk_hash = sha256_bytes(part)
+            
+            log_console(f"📤 Processing chunk {i+1}/{len(parts)}: {chunk_name} ({len(part)} bytes)")
 
             # Replicate to all available nodes
             replicas = []
             for node in DATANODES.keys():
+                log_console(f"  → Attempting to store on {node}...")
                 if store_chunk(node, chunk_name, payload):
                     replicas.append(node)
+                    log_console(f"  ✅ Success on {node}")
+                else:
+                    log_console(f"  ❌ Failed on {node}")
 
             if not replicas:
+                log_console(f"❌ No replicas for chunk {chunk_name}")
                 return {"status": "error", "msg": f"Failed to store {chunk_name}"}
 
             chunks_meta.append({
@@ -214,6 +250,8 @@ def handle_upload(filename: str, content_str: str) -> dict:
                 "replicas": replicas,
                 "checksum": chunk_hash
             })
+            
+            log_console(f"✅ Chunk {i+1}/{len(parts)} stored on {len(replicas)} node(s)")
 
         # Save metadata
         with lock:
@@ -223,7 +261,7 @@ def handle_upload(filename: str, content_str: str) -> dict:
             }
         save_metadata()
         
-        log_console(f"✅ Uploaded {filename} in {len(chunks_meta)} chunks")
+        log_console(f"✅✅ UPLOAD COMPLETE: {filename} in {len(chunks_meta)} chunks")
         return {"status": "uploaded", "chunks": len(chunks_meta)}
 
     except Exception as e:
